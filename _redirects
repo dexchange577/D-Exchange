@@ -1,0 +1,1 @@
+# Do not redirect /api/hesabpay/webhook: the Netlify Function owns this route.
