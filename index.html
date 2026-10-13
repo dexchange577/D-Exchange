@@ -4068,46 +4068,30 @@ window.addEventListener('load',function(){if(document.documentElement.classList.
 
 <script id="dx-v5-js">
 (function(){
-// ---- Provider API settings: keys go to the secure gateway (never stored in the browser) ----
+// Provider credentials are Supabase Edge Function Secrets. The gateway cannot
+// safely write its own Supabase project secrets, so this UI only reads status
+// and tests configured credentials; it never pretends browser-submitted keys were saved.
 const GW=()=>String((window.GATEWAY)||(String(state.db?.url||'').replace(/\/$/,'')+'/functions/v1/dexchange-gateway'));
-async function call(body){
+async function request(path,method='GET',body){
  const {data,error}=await supabaseClient.auth.getSession();
  const tok=data?.session?.access_token;if(error||!tok)throw new Error('Please login again');
- const r=await fetch(GW(),{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify(body)});
+ const r=await fetch(GW()+path,{method,headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},...(body?{body:JSON.stringify(body)}:{})});
  const j=await r.json().catch(()=>({}));
- if(!r.ok&&!j.message)throw new Error('Gateway HTTP '+r.status+' — is dexchange-gateway deployed?');
- return j;
+ if(!r.ok||j.ok===false)throw new Error(j.message||('Gateway HTTP '+r.status));return j;
 }
-const val=id=>document.getElementById(id)?.value.trim()||'';
 window.dxProviderApi=async function(){
  if(!ensureAdmin())return toast('Admin access required');
  if(!dbReady())return toast('Supabase backend is not connected');
- let st={};try{const r=await call({action:'credentials_status'});if(!r.ok)throw new Error(r.message);st=r.status}catch(e){return showModal('<h3>Provider API Settings</h3><div class="notice">'+esc(e.message)+'<br>Deploy <code>dexchange-gateway</code> first (see setup guide).</div><button class="outline" onclick="closeModal()">Close</button>')}
- const tag=b=>'<span class="dx-badge" style="'+(b?'':'background:#fdecec;color:#b42318;border-color:#f3b4ae')+'">'+(b?'Saved':'Not set')+'</span>';
- const copy=(id,v)=>'<div class="field"><label>'+id+'</label><div class="copyline"><input id="'+id+'" readonly value="'+esc(v)+'"><button class="outline" onclick="copyText(\''+id+'\')">Copy</button></div></div>';
- showModal('<h3>Provider API Settings</h3><div class="notice">Keys are saved only on the secure server. Leave a field empty to keep the saved value.</div>'+
- '<div class="dx-cur"><div style="display:flex;justify-content:space-between"><h4>HesabPay (AFN)</h4>'+tag(st.HESABPAY_API_KEY)+'</div>'+
- '<div class="field"><label>API Key</label><input id="pa_h_key" type="password" autocomplete="new-password" placeholder="HesabPay API Key"></div>'+
- '<div class="field"><label>Environment</label><select id="pa_h_env"><option value="sandbox" '+(st.HESABPAY_ENV!=='production'?'selected':'')+'>Sandbox (test)</option><option value="production" '+(st.HESABPAY_ENV==='production'?'selected':'')+'>Production (live)</option></select></div>'+
- '<button class="outline" onclick="dxPaTest(\'afn\')">Test HesabPay</button>'+copy('HesabPay webhook URL',st.webhook_hesabpay)+'</div>'+
- '<div class="dx-cur"><div style="display:flex;justify-content:space-between"><h4>AZADCoin (USDT + AZAD)</h4>'+tag(st.AZADCOIN_API_KEY&&st.AZADCOIN_API_SECRET)+'</div>'+
- '<div class="field"><label>API Key (azad_live_...)</label><input id="pa_a_key" type="password" autocomplete="new-password"></div>'+
- '<div class="field"><label>API Secret</label><input id="pa_a_sec" type="password" autocomplete="new-password"></div>'+
- '<div class="field"><label>Webhook Secret '+tag(st.AZADCOIN_WEBHOOK_SECRET)+'</label><input id="pa_a_wh" type="password" autocomplete="new-password"></div>'+
- '<button class="outline" onclick="dxPaTest(\'crypto\')">Test AZADCoin</button>'+copy('AZADCoin webhook URL',st.webhook_azadcoin)+'</div>'+
- '<div class="actions"><button class="primary gold" onclick="dxPaSave()">Save</button><button class="outline" onclick="closeModal()">Close</button></div>')};
+ let cfg;try{cfg=await request('/admin/config','GET')}catch(e){return showModal('<h3>Provider API Settings</h3><div class="notice">'+esc(e.message)+'<br>Check admin access and deploy the current dexchange-gateway.</div><button class="outline" onclick="closeModal()">Close</button>')}
+ const c=cfg.configured||{},tag=b=>'<span class="dx-badge" style="'+(b?'':'background:#fdecec;color:#b42318;border-color:#f3b4ae')+'">'+(b?'Configured':'Not configured')+'</span>';
+ const webhook=GW().replace(/\/$/,'').replace(/\/functions\/v1\/dexchange-gateway$/,'').replace(/\/functions\/v1\/dexchange-gateway.*$/,'')+'/api/hesabpay/webhook';
+ showModal('<h3>Provider API Settings</h3><div class="notice">Provider keys are managed only in Supabase → Edge Functions → Secrets. For security, this page does not collect or claim to save secret keys.</div>'+ 
+ '<div class="dx-cur"><div style="display:flex;justify-content:space-between"><h4>HesabPay (AFN)</h4>'+tag(!!c.hesabpay)+'</div><div class="field"><label>Webhook URL</label><div class="copyline"><input id="dxHWebhook" readonly value="'+esc(webhook)+'"><button class="outline" onclick="copyText(&#39;dxHWebhook&#39;)">Copy</button></div></div><button class="outline" onclick="dxPaTest(&#39;afn&#39;)">Test HesabPay</button></div>'+ 
+ '<div class="dx-cur"><div style="display:flex;justify-content:space-between"><h4>AZADCoin (USDT + AZAD)</h4>'+tag(!!c.azadcoin)+'</div><button class="outline" onclick="dxPaTest(&#39;crypto&#39;)">Test AZADCoin</button></div>'+ 
+ '<div class="actions"><button class="outline" onclick="dxPaTest(&#39;all&#39;)">Test Provider APIs</button><button class="outline" onclick="closeModal()">Close</button></div>')};
 window.adminAPIs=window.dxApiSettings=window.dxProviderApi;
-window.dxPaSave=async function(){
- const values={HESABPAY_API_KEY:val('pa_h_key'),HESABPAY_ENV:val('pa_h_env'),AZADCOIN_API_KEY:val('pa_a_key'),AZADCOIN_API_SECRET:val('pa_a_sec'),AZADCOIN_WEBHOOK_SECRET:val('pa_a_wh')};
- try{const r=await call({action:'save_credentials',values});if(!r.ok)throw new Error(r.message);toast('Saved: '+(r.saved.length?r.saved.join(', '):'nothing changed'));dxProviderApi()}catch(e){toast(e.message)}};
 window.dxPaTest=async function(kind){
- const body=kind==='afn'?{action:'test_connection',integration:'afn',apiKey:val('pa_h_key'),env:val('pa_h_env')}:{action:'test_connection',integration:'crypto',apiKey:val('pa_a_key'),secretKey:val('pa_a_sec')};
- try{const r=await call(body);toast(r.message||(r.ok?'Connection OK':'Connection failed'))}catch(e){toast(e.message)}};
-// ---- after HesabPay redirect: refresh balances and clean URL ----
-(function(){const q=new URLSearchParams(location.search),d=q.get('deposit');if(!d)return;
- history.replaceState(null,'',location.pathname);
- setTimeout(async()=>{try{if(window.DXStartup)await window.DXStartup.refresh(true);openView('dashboard')}catch(e){console.error('[DX STARTUP] post-payment refresh failed',e)}
-  toast(d==='success'?'Payment received — your balance updates after HesabPay confirms it':'Payment was cancelled or failed')},1500)})();
+ try{const r=await request('/test-connection','POST',{provider:kind==='afn'?'hesabpay':kind==='crypto'?'azadcoin':'all'});toast(r.message||(r.ok?'Connection OK':'Connection failed'))}catch(e){toast(e.message||'API connection failed')}};
 })();
 </script>
 
