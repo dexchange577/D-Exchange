@@ -590,7 +590,7 @@ function initSupabase(){try{if(supabaseClient){window.supabaseClient=supabaseCli
 function dbReady(){return !!supabaseClient||initSupabase()}
 async function dbSyncCurrent(){if(!dbReady()||!state.current)return;const u=current();if(!u||!u.id)return;try{const {data:{user}}=await supabaseClient.auth.getUser();if(!user)return;u.id=user.id;try{if(window.dxReconcileRequests)await window.dxReconcileRequests()}catch(e){console.error("[DX WALLET] reconcile failed",e)}const profile={id:user.id,first_name:u.first||"",last_name:u.last||"",email:u.email||user.email||"",phone:u.phone||"",referred_by_code:u.referredBy||null,points_balance:Number(u.points||0),};if(u.avatar)profile.avatar_url=u.avatar;else if(u.__avatarExplicitlyRemoved)profile.avatar_url=null;await supabaseClient.from("profiles").upsert(profile,{onConflict:"id"});/* wallet balances are server-owned: no client write path */const rows=(u.tx||[]).map(t=>({user_id:user.id,tx_id:String(t.txId||t.id||uid()),type:({"Deposit":"deposit","Withdraw":"withdraw","Swap":"swap","Points Redeem":"points_redeem","Points Adjustment":"points_adjustment","Easyload":"easyload"}[t.type]||"points_adjustment"),currency:String(t.currency||"AFN"),amount:Number(t.amount||0),received_amount:t.out==null?null:Number(t.out||0),fee:Number(t.fee||0),from_value:t.from||null,to_value:t.to||t.dest||t.phone||null,network:t.network||null,approval_mode:t.approvalMode||"automatic",status:t.status||"pending",balance_before:t.balanceBefore==null?null:Number(t.balanceBefore),balance_after:t.balanceAfter==null?null:Number(t.balanceAfter),metadata:t.meta||t.metadata||{},created_at:t.time||new Date().toISOString()}));if(rows.length){
   /* a request that is still pending locally may only be INSERTED; it must never overwrite a row the admin has already confirmed/rejected */
-  const isOpenReq=r=>(r.type==="withdraw"||r.type==="easyload")&&!["confirmed","completed","success","approved","paid","rejected","failed","cancelled","canceled","declined","refunded","expired"].includes(String(r.status||"pending").toLowerCase());
+  const isOpenReq=r=>(r.type==="withdraw"||r.type==="easyload"||r.type==="deposit")&&!["confirmed","completed","success","approved","paid","rejected","failed","cancelled","canceled","declined","refunded","expired"].includes(String(r.status||"pending").toLowerCase());
   const openRows=rows.filter(isOpenReq),otherRows=rows.filter(r=>!isOpenReq(r));
   if(otherRows.length)await supabaseClient.from("transactions").upsert(otherRows,{onConflict:"tx_id"});
   if(openRows.length)await supabaseClient.from("transactions").upsert(openRows,{onConflict:"tx_id",ignoreDuplicates:true});
@@ -607,10 +607,13 @@ async function dbHydrateUser(authUser){return window.DXStartup?window.DXStartup.
 async function dbHydrateUserCore(authUser){
   if(!dbReady()||!authUser)return null;
   try{
-    let [{data:profile,error:pe},{data:wallet,error:we},{data:txs,error:te}]=await Promise.all([
+    /* a different account than the one held in memory: drop the previous account's data first */
+    if(state.current&&state.current!==authUser.id){state.users=[];state.current=null;window.__adminHydratedAt=0}
+    let [{data:profile,error:pe},{data:wallet,error:we},{data:txs,error:te},refRes]=await Promise.all([
       supabaseClient.from("profiles").select("*").eq("id",authUser.id).limit(1).maybeSingle(),
       supabaseClient.from("wallets").select("*").eq("user_id",authUser.id).limit(1).maybeSingle(),
-      supabaseClient.from("transactions").select("*").eq("user_id",authUser.id).order("created_at",{ascending:false})
+      supabaseClient.from("transactions").select("*").eq("user_id",authUser.id).order("created_at",{ascending:false}),
+      supabaseClient.from("dx_referrals").select("status").eq("inviter",authUser.id).then(r=>r,e=>({error:e}))
     ]);
     if(pe){console.error("[DX PROFILE] read failed",pe);throw pe}
     if(we){console.error("[DX WALLET] read failed",we);throw we}
@@ -652,7 +655,7 @@ async function dbHydrateUserCore(authUser){
     if(persistedReferralCode && String(profile.referral_code||"")!==persistedReferralCode){
       try{const cr=await supabaseClient.from("profiles").update({referral_code:persistedReferralCode}).eq("id",authUser.id);if(cr.error)console.warn("[DX REFERRAL] code persistence failed",cr.error)}catch(e){console.warn("[DX REFERRAL] code persistence error",e)}
     }
-    try{const rr=await supabaseClient.from("dx_referrals").select("status").eq("inviter",authUser.id);if(rr.error)console.error("[DX PROFILE] referrals read failed",rr.error);else{u.totalRef=(rr.data||[]).length;u.activeRef=(rr.data||[]).filter(x=>x.status==="active").length}}catch(e){console.error("[DX PROFILE] referrals read error",e)}
+    try{const rr=refRes||{};if(rr.error)console.error("[DX PROFILE] referrals read failed",rr.error);else{u.totalRef=(rr.data||[]).length;u.activeRef=(rr.data||[]).filter(x=>x.status==="active").length}}catch(e){console.error("[DX PROFILE] referrals read error",e)}
     state.users=state.users.filter(x=>x.id!==u.id);
     state.users.push(u);
     state.current=u.id;
@@ -802,7 +805,7 @@ async function saveRecoveredPassword(e){
 async function login(e){e.preventDefault();const email=document.getElementById("loginEmail").value.trim().toLowerCase(),pass=document.getElementById("loginPass").value;if(!dbReady())return toast("Secure database connection is required");try{const data=await dbSignIn(email,pass);const u=current();if(u?.status==="blocked")return toast(tr("Blocked account"));if(u){u.lastLogin=new Date().toISOString();save()}enterApp();return}catch(err){console.error(err);return toast(err.message||tr("Wrong login"))}}
 function enterApp(){const u=current();if(!u||u.status!=="active"){state.current=null;save();return showAuth()}document.getElementById("auth").classList.add("hidden");document.getElementById("app").classList.remove("hidden");applyTheme();updateHeader();openView("dashboard")}
 function showAuth(){document.getElementById("auth").classList.remove("hidden");document.getElementById("app").classList.add("hidden");authMode("login")}
-async function logout(){try{await dbSignOut()}catch(e){}state.current=null;save();showAuth();toast(tr("Logged out"))}
+async function logout(){try{window.DXSync&&DXSync.stop()}catch(e){}try{await dbSignOut()}catch(e){}state.current=null;state.users=[];window.__adminHydratedAt=0;save();showAuth();toast(tr("Logged out"))}
 function applyTheme(){document.body.classList.toggle("dark",state.theme==="dark")}
 function toggleTheme(){state.theme=state.theme==="dark"?"light":"dark";save();applyTheme()}
 function toggleLang(){document.getElementById("langMenu").classList.toggle("hidden")}
@@ -4450,7 +4453,7 @@ body.dark,.dark body{--bg:#0b1418;--dx-smoke-tint:rgba(75,132,137,.105);backgrou
 </script>
 <style>
 /* V13 reference-matched premium financial cards */
-:root{--dx-card-bg:rgba(255,255,255,.94);--dx-card-border:rgba(255,255,255,.88);--dx-card-text:#173b91;--dx-card-muted:#d9edff;--dx-card-shadow:0 16px 34px rgba(17,45,110,.18),0 4px 10px rgba(24,52,105,.08);--dx-blue1:#1b2fbd;--dx-blue2:#1768d9;--dx-cyan:#06c8ef}
+:root{--dx-card-bg:rgba(255,255,255,.94);--dx-card-border:rgba(255,255,255,.88);--dx-card-text:#173b91;--dx-card-muted:#4b5b78;--dx-card-shadow:0 16px 34px rgba(17,45,110,.18),0 4px 10px rgba(24,52,105,.08);--dx-blue1:#1b2fbd;--dx-blue2:#1768d9;--dx-cyan:#06c8ef}
 .dark{--dx-card-bg:rgba(19,29,54,.96);--dx-card-border:rgba(119,153,224,.22);--dx-card-text:#f1f6ff;--dx-card-muted:#aebfe5;--dx-card-shadow:0 16px 34px rgba(0,0,0,.34),0 4px 10px rgba(0,0,0,.2);--dx-blue1:#17246f;--dx-blue2:#174eae;--dx-cyan:#06a9d8}
 .dx-premium-balance{position:relative;isolation:isolate;overflow:hidden;border:1px solid rgba(255,255,255,.28);border-radius:28px;padding:23px 22px 21px;margin:14px 0 20px;color:#fff;background:linear-gradient(128deg,var(--dx-blue1) 0%,#2146d3 46%,var(--dx-blue2) 76%,var(--dx-cyan) 120%);box-shadow:0 18px 32px rgba(18,48,128,.25),inset 0 1px 0 rgba(255,255,255,.26);min-height:185px}
 .dx-premium-balance:before,.dx-premium-balance:after{content:"";position:absolute;z-index:-1;border-radius:50%;pointer-events:none;background:rgba(255,255,255,.065)}.dx-premium-balance:before{width:210px;height:210px;right:-72px;top:-104px}.dx-premium-balance:after{width:145px;height:145px;left:-48px;bottom:-82px;background:rgba(2,220,255,.10)}
@@ -4544,12 +4547,14 @@ body.dark,.dark body{--bg:#0b1418;--dx-smoke-tint:rgba(75,132,137,.105);backgrou
   window.community=async function(v){
     if(!v)return;const me=typeof current==='function'?current():null;
     v.innerHTML=`<div class="screen"><div class="panel"><p class="muted">${escv(tr('Loading'))}…</p></div></div>`;
+    const __cm=window.dxCommunityFetch?await window.dxCommunityFetch():{ok:false};
     let profiles=[];
-    try{if(window.supabaseClient&&typeof dbReady==='function'&&dbReady()){const q=await supabaseClient.from('profiles').select('id,first_name,last_name,points_balance,status,created_at').order('points_balance',{ascending:false}).limit(200);if(q.error)throw q.error;profiles=q.data||[]}}catch(e){console.warn('[DX V18] community profiles:',e?.message||e)}
-    const local=Array.isArray(state?.users)?state.users.filter(u=>u.status!=='deleted'):[];const byId=new Map();
+    try{if(!__cm.ok&&window.supabaseClient&&typeof dbReady==='function'&&dbReady()){const q=await supabaseClient.from('profiles').select('id,first_name,last_name,points_balance,status,created_at').order('points_balance',{ascending:false}).limit(200);if(q.error)throw q.error;profiles=q.data||[]}}catch(e){console.warn('[DX V18] community profiles:',e?.message||e)}
+    const local=(!__cm.ok&&Array.isArray(state?.users))?state.users.filter(u=>u.status!=='deleted'):[];const byId=new Map();
+    if(__cm.ok)__cm.rows.forEach((r,i)=>byId.set('m'+i,{id:'m'+i,first:r.first_name||'',last:r.last_name||'',points:n(r.points_balance),status:'active',activeRef:n(r.active_referrals),totalRef:n(r.total_referrals)}));
     profiles.forEach(p=>byId.set(String(p.id),{id:p.id,first:p.first_name||'',last:p.last_name||'',points:n(p.points_balance),status:p.status||'active'}));
     local.forEach(u=>{const id=safe(u.id);if(!id)return;const p=byId.get(id)||{};byId.set(id,{...p,id,first:p.first||u.first||'',last:p.last||u.last||'',points:Math.max(n(p.points),n(u.points)),status:p.status||u.status||'active',activeRef:n(u.activeRef),totalRef:n(u.totalRef)})});
-    let refRows=[];try{if(window.supabaseClient&&dbReady()){const q=await supabaseClient.from('dx_referrals').select('inviter,status').limit(3000);if(!q.error)refRows=q.data||[]}}catch(e){console.warn('[DX V18] referral counts:',e?.message||e)}
+    let refRows=[];try{if(!__cm.ok&&window.supabaseClient&&dbReady()){const q=await supabaseClient.from('dx_referrals').select('inviter,status').limit(3000);if(!q.error)refRows=q.data||[]}}catch(e){console.warn('[DX V18] referral counts:',e?.message||e)}
     let users=[...byId.values()].filter(u=>u.status!=='deleted').map(u=>{const rr=refRows.filter(r=>safe(r.inviter)===safe(u.id));const active=rr.filter(r=>safe(r.status).toLowerCase()==='active').length;return {...u,totalRef:rr.length||n(u.totalRef),activeRef:rr.length?active:n(u.activeRef)}}).sort((a,b)=>b.points-a.points||b.activeRef-a.activeRef||b.totalRef-a.totalRef);
     const rows=users.map((u,i)=>`<tr><td><span class="dx-rank ${i<3?'top-rank':''}">${i+1}</span></td><td><span class="dx-community-name">${escv(nameOf(u))}</span></td><td><span class="dx-point-pill">⭐ ${n(u.points)}</span></td><td><span class="dx-ref-pill">${n(u.activeRef)} / ${n(u.totalRef)}</span></td></tr>`).join('')||`<tr><td colspan="4" style="text-align:center;padding:18px">${escv(L('تر اوسه کاروونکي نشته','No users yet','هنوز کاربری وجود ندارد'))}</td></tr>`;
     v.innerHTML=`<div class="screen">${screenHead(tr('Community'),tr('Community subtitle'))}<section class="dx-community-hero" aria-label="${escv(L('د ټولنې درجه بندي','Community leaderboard','رتبه‌بندی جامعه'))}"><div class="dx-community-hero-copy"><span class="dx-community-hero-kicker">D EXCHANGE · COMMUNITY</span><h2>${escv(L('د ټولنې اتلان','Community champions','برترین‌های جامعه'))}</h2><p>${escv(L('امتیازونه او ریفرلونه په یوه منظم جدول کې وګورئ.','Celebrate community progress through points and referrals.','پیشرفت جامعه را با امتیازها و معرفی‌ها دنبال کنید.'))}</p><span class="dx-community-hero-chip"><span aria-hidden="true">✦</span> ${escv(L('درجه بندي په ژونديو معلوماتو','Live community ranking','رتبه‌بندی جامعه'))}</span></div><div class="dx-community-hero-art" aria-hidden="true"><svg viewBox="0 0 240 190" role="img"><defs><linearGradient id="dxCommGold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff0a6"/><stop offset=".48" stop-color="#ffc52f"/><stop offset="1" stop-color="#df8a09"/></linearGradient><linearGradient id="dxCommBlue" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#54d7f4"/><stop offset="1" stop-color="#2473db"/></linearGradient></defs><circle cx="127" cy="90" r="78" fill="#ffffff" opacity=".08"/><circle cx="127" cy="90" r="62" fill="none" stroke="#f8d76a" stroke-opacity=".45" stroke-width="1.5" stroke-dasharray="4 7"/><path d="M30 153h180" stroke="#b6e8ff" stroke-opacity=".5" stroke-width="2"/><rect x="35" y="105" width="47" height="48" rx="9" fill="url(#dxCommBlue)"/><rect x="83" y="76" width="65" height="77" rx="10" fill="url(#dxCommGold)"/><rect x="149" y="92" width="48" height="61" rx="9" fill="#f5fbff" stroke="#80d8f3" stroke-width="2"/><path d="M100 98l15 16 29-34" fill="none" stroke="#173d70" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/><path d="M58 120v20M49 130h18M165 107h15M165 117h20M165 127h12" stroke="#2473db" stroke-width="3" stroke-linecap="round"/><path d="M28 45l5 11 12 2-9 8 2 12-10-6-10 6 2-12-9-8 12-2z" fill="url(#dxCommGold)"/><path d="M193 33l4 8 9 1-7 6 2 9-8-5-8 5 2-9-7-6 9-1z" fill="#7fe1f7"/><circle cx="203" cy="140" r="8" fill="url(#dxCommGold)"/><circle cx="41" cy="87" r="5" fill="#7fe1f7"/></svg></div></section><div class="panel dx-community-intro"><div class="dx-community-trophy">🏆</div><div><h3>${escv(L('د پواينټونو سيالي','Points leaderboard','رقابت امتیازها'))}</h3><p class="muted">${escv(L('یوازې نوم، پواينټونه او ريفريلونه ښکاري.','Only names, points and referral counts are shown.','فقط نام، امتیازها و تعداد معرفی‌ها نمایش داده می‌شود.'))}</p></div></div><div class="tablewrap dx-community-wrap"><table class="table dx-v18-community-table"><thead><tr><th>#</th><th>${escv(tr('Name'))}</th><th>${escv(tr('Points'))}</th><th>${escv(L('ريفريلونه','Referrals','معرفی‌ها'))}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
@@ -6750,7 +6755,7 @@ async function syncTxStatus(){ // synchronize transaction statuses and server-ow
   if(wr&&!wr.error&&wr.data){
    u.balances=Object.assign({},u.balances,{AFN:Number(wr.data.afn||0),USDT:Number(wr.data.usdt||0),AZAD:Number(wr.data.azad||0)});
   }
-  try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}
+  /* financial data is never cached on disk */
  }catch(e){console.warn('transaction status sync:',e&&e.message||e)}
 }
 try{var c=JSON.parse(ls('dx_ann_cache')||'[]');if(Array.isArray(c))ann=c}catch(e){}
@@ -6980,7 +6985,7 @@ async function reconcile(){
     if(r.balance_after!=null)t.balanceAfter=Number(r.balance_after);
     done.push(t);
   });
-  if(done.length){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}}
+  if(done.length){try{var __p=JSON.parse(JSON.stringify(state));__p.users=[];__p.current=null;localStorage.setItem(KEY,JSON.stringify(__p))}catch(e){}}
   return done;
 }
 /* never let an old local "pending" copy (or old local balance) overwrite what the admin already decided:
@@ -7111,7 +7116,8 @@ function subscribeRealtime(){
   try{
     const u=cur();if(!ready()||!u||rtFor===u.id||typeof supabaseClient.channel!=='function')return;
     rtFor=u.id;
-    supabaseClient.channel('dx-req-'+u.id).on('postgres_changes',{event:'*',schema:'public',table:'transactions',filter:'user_id=eq.'+u.id},()=>tick()).subscribe();
+    window.__dxReqChan=supabaseClient.channel('dx-req-'+u.id).on('postgres_changes',{event:'*',schema:'public',table:'transactions',filter:'user_id=eq.'+u.id},()=>tick()).subscribe();
+    window.__dxReqChanStop=function(){try{if(window.__dxReqChan)supabaseClient.removeChannel(window.__dxReqChan)}catch(e){}window.__dxReqChan=null;rtFor=null;stopPolling()};
   }catch(e){}
 }
 /* resume watching requests that are still pending after a refresh / reopen */
@@ -7179,18 +7185,19 @@ async function pipeline(sess,reason){
     S.status='hydrating';S.authReady=true;
     var au=sess.user;
     /* getUser validates the session, but a temporary network failure must NOT log the user out. */
-    try{var gu=await TO(supabaseClient.auth.getUser(),4500,'getUser');if(!gu.error&&gu.data?.user)au=gu.data.user}catch(e){log('AUTH','getUser delayed; using valid stored session',e)}
+    /* Not awaited: every query below is authorised server-side by the JWT/RLS anyway, so waiting for this extra round trip only delayed the first paint. */
+    try{TO(supabaseClient.auth.getUser(),8000,'getUser').catch(function(e){log('AUTH','getUser check delayed',e)})}catch(e){}
     var u=await TO(dbHydrateUserCore(au),10000,'profile+wallet');
     if(!u)throw new Error('Account data could not be loaded');
     S.profileReady=true;S.walletReady=true;
     if(u.status!=='active'){try{await supabaseClient.auth.signOut({scope:'local'})}catch(e){}return anon('account not active')}
     /* IMPORTANT: enter app immediately. Rates/settings/admin are not login blockers. */
-    renderFast();S.status='ready';lastRefresh=Date.now();retryN=0;done();
+    renderFast();S.status='ready';lastRefresh=Date.now();retryN=0;done();try{window.dxHideLoadRetry&&window.dxHideLoadRetry();window.DXSync&&DXSync.start()}catch(_){}
     setTimeout(function(){backgroundData().catch(function(e){log('BACKGROUND','load failed',e)})},0);
-  })().catch(function(e){S.status='error';S.error=String(e?.message||e);log('STARTUP','pipeline failed ('+reason+')',e);toast('Could not load your account - please try again');if(!current())showAuth();done()}).finally(function(){pipeP=null;pipeUid=null});
+  })().catch(function(e){S.status='error';S.error=String(e?.message||e);log('STARTUP','pipeline failed ('+reason+')',e);toast('Could not load your account - please try again');if(!current())showAuth();done();try{window.dxShowLoadRetry&&window.dxShowLoadRetry()}catch(_){}}).finally(function(){pipeP=null;pipeUid=null});
   return pipeP;
 }
-function renderFast(){var app=document.getElementById('app'),me=current();if(!me)return showAuth();if(app&&!app.classList.contains('hidden')){try{updateHeader()}catch(e){}return}enterApp()}
+function renderFast(){var app=document.getElementById('app'),me=current();if(!me)return showAuth();if(app&&!app.classList.contains('hidden')){if(window.__dxShownUid&&window.__dxShownUid!==me.id){enterApp();return}try{updateHeader()}catch(e){}return}enterApp()}
 function onAuth(ev,s){
   if(ev==='SIGNED_OUT'){if(S.status!=='anon'){anon('signed out')}return}
   if((ev==='SIGNED_IN'||ev==='TOKEN_REFRESHED'||ev==='INITIAL_SESSION')&&s?.user){if(S.status==='ready'&&current()?.id===s.user.id)return;pipeline(s,'auth-event')}
@@ -8297,5 +8304,190 @@ window.adminOtpCodes = async function(){
       return prevSet.apply(this,arguments);
     };
   }
+})();
+</script>
+
+<script id="dx-balance-sync-v1">
+/* D Exchange - authoritative balance/transaction sync + Community data source + startup retry.
+   Additive module: it never writes money state, it only READS the server's wallet/transaction rows
+   (RLS-protected) and mirrors them in the UI. One Realtime channel per signed-in user, removed on
+   logout / account switch / expired session. */
+(function(){
+'use strict';
+var epoch=0,chan=null,chanUid=null,timer=null,inflight=null,dirty=false,wired=false,retries=0,lastKick=0,lastErrAt=0;
+function sb(){return window.supabaseClient||null}
+function me(){try{return typeof current==='function'?current():null}catch(e){return null}}
+function lang(){try{return state.lang||'ps'}catch(e){return 'ps'}}
+function L(ps,fa,en){var l=lang();return l==='en'?en:l==='fa'?fa:ps}
+var TYPE={deposit:'Deposit',withdraw:'Withdraw',swap:'Swap',points_redeem:'Points Redeem',points_adjustment:'Points Adjustment',easyload:'Easyload'};
+function mapRow(t){return {id:t.tx_id,txId:t.tx_id,type:TYPE[t.type]||t.type,amount:Number(t.amount||0),currency:t.currency,out:t.received_amount==null?null:Number(t.received_amount),fee:Number(t.fee||0),from:t.from_value||null,to:t.to_value||null,network:t.network||null,approvalMode:t.approval_mode||'automatic',status:t.status||'pending',balanceBefore:t.balance_before==null?null:Number(t.balance_before),balanceAfter:t.balance_after==null?null:Number(t.balance_after),meta:t.metadata||{},time:t.created_at||new Date().toISOString()}}
+
+/* ---------- Realtime lifecycle ---------- */
+function stop(){
+  epoch++;clearTimeout(timer);timer=null;dirty=false;
+  var c=sb();
+  if(chan&&c){try{c.removeChannel(chan)}catch(e){}}
+  chan=null;chanUid=null;
+  try{window.__dxReqChanStop&&window.__dxReqChanStop()}catch(e){}
+}
+function sched(ms){clearTimeout(timer);timer=setTimeout(refresh,ms==null?350:ms)}
+function start(){
+  var u=me(),c=sb();
+  if(!u||!u.id||!c||typeof c.channel!=='function')return;
+  wire();
+  if(chan&&chanUid===u.id)return;
+  stop();var uid=u.id,ep=epoch;chanUid=uid;
+  try{
+    chan=c.channel('dx-sync-'+uid)
+      .on('postgres_changes',{event:'*',schema:'public',table:'wallets',filter:'user_id=eq.'+uid},function(){if(ep===epoch)sched()})
+      .on('postgres_changes',{event:'*',schema:'public',table:'transactions',filter:'user_id=eq.'+uid},function(){if(ep===epoch)sched()})
+      .subscribe(function(status){
+        if(ep!==epoch)return;
+        if(status==='SUBSCRIBED'){retries=0;sched(0)}   /* catch up on anything missed while disconnected */
+        else if((status==='CHANNEL_ERROR'||status==='TIMED_OUT')&&retries<3){
+          retries++;var d=[2000,6000,15000][retries-1];
+          setTimeout(function(){if(ep===epoch){var cc=chan;chan=null;try{cc&&c.removeChannel(cc)}catch(e){}start()}},d);
+        }
+      });
+  }catch(e){console.warn('[DX SYNC] subscribe failed',e&&e.message||e)}
+}
+function wire(){
+  if(wired)return;var c=sb();if(!c)return;wired=true;
+  try{c.auth.onAuthStateChange(function(ev,sess){
+    setTimeout(function(){
+      if(ev==='SIGNED_OUT'){stop();return}
+      var u=me();
+      if(sess&&sess.user&&window.__dxShownUid&&window.__dxShownUid!==sess.user.id){   /* another account signed in: remove the previous account's screen at once */
+        stop();var v=document.getElementById('view');if(v)v.innerHTML='<div class="screen"><div class="panel"><p class="muted" style="text-align:center;padding:24px 0">…</p></div></div>';
+      }
+      if(sess&&sess.user&&chanUid&&chanUid!==sess.user.id){stop()}
+      if(ev==='SIGNED_IN'&&u&&sess&&sess.user&&u.id===sess.user.id)start();
+    },0);
+  })}catch(e){}
+  function kick(){var n=Date.now();if(n-lastKick<5000)return;lastKick=n;if(!document.hidden&&me()){start();sched(0)}}
+  document.addEventListener('visibilitychange',kick);
+  window.addEventListener('online',kick);
+}
+
+/* ---------- Authoritative refresh (read-only) ---------- */
+function refresh(){
+  if(inflight){dirty=true;return inflight}
+  var u=me(),c=sb();if(!u||!u.id||!c)return Promise.resolve();
+  var uid=u.id,ep=epoch;
+  inflight=(async function(){
+    try{
+      var gs=await c.auth.getSession();var ses=gs&&gs.data&&gs.data.session;
+      if(!ses||!ses.user||ses.user.id!==uid)return;                              /* expired / switched: never show data for another session */
+      var r=await Promise.all([
+        c.from('wallets').select('afn,usdt,azad').eq('user_id',uid).maybeSingle(),
+        c.from('transactions').select('*').eq('user_id',uid).order('created_at',{ascending:false}).limit(200)
+      ]);
+      if(r[0].error)throw r[0].error;if(r[1].error)throw r[1].error;
+      var cu=me();if(ep!==epoch||!cu||cu.id!==uid)return;                        /* account changed while the request was in flight */
+      var w=r[0].data,changed=false;
+      if(w){var nb={AFN:Number(w.afn||0),USDT:Number(w.usdt||0),AZAD:Number(w.azad||0)};
+        ['AFN','USDT','AZAD'].forEach(function(k){if(Number(cu.balances[k])!==nb[k])changed=true});
+        cu.balances=Object.assign({},cu.balances,nb)}
+      var rows=r[1].data||[],byId={};rows.forEach(function(x){byId[String(x.tx_id)]=mapRow(x)});
+      var seen={},merged=[];
+      rows.forEach(function(x){var id=String(x.tx_id);seen[id]=1;merged.push(byId[id])});
+      (cu.tx||[]).forEach(function(t){var id=String(t.txId||t.id);if(!seen[id]){seen[id]=1;merged.push(t)}});   /* keep older rows beyond the 200 fetched */
+      var sig=function(a){return a.map(function(t){return (t.txId||t.id)+':'+t.status+':'+(t.balanceAfter==null?'':t.balanceAfter)}).join('|')};
+      if(sig(merged)!==sig(cu.tx||[]))changed=true;
+      cu.tx=merged;
+      try{normalizeUser(cu)}catch(e){}
+      lastErrAt=0;
+      if(changed)rerender();
+    }catch(e){
+      console.warn('[DX SYNC] refresh failed',e&&e.message||e);
+      lastErrAt=Date.now();
+      if(me()&&me().id===uid&&ep===epoch&&retries<3){retries++;setTimeout(function(){if(ep===epoch)sched(0)},[2000,6000,15000][retries-1])}
+    }finally{
+      inflight=null;
+      if(dirty){dirty=false;sched(200)}
+    }
+  })();
+  return inflight;
+}
+function rerender(){
+  try{
+    var f=document.activeElement;if(f&&/INPUT|SELECT|TEXTAREA/.test(f.tagName))return;      /* never wipe a form the user is filling */
+    if(document.getElementById('dxProc'))return;                                           /* processing screen is updated by its own watcher */
+    if(typeof currentView!=='undefined'&&['dashboard','history','transactions','withdrawHistory'].indexOf(currentView)>-1&&typeof openView==='function')openView(currentView);
+    if(typeof updateHeader==='function')updateHeader();
+  }catch(e){}
+}
+window.DXSync={start:start,stop:stop,refresh:function(){return refresh()}};
+
+/* start/stop together with the app lifecycle */
+(function(){
+  var oe=window.enterApp;
+  if(typeof oe==='function')window.enterApp=function(){var r=oe.apply(this,arguments);try{window.__dxShownUid=me()?me().id:null}catch(e){}setTimeout(start,0);return r};
+  var os=window.showAuth;
+  if(typeof os==='function')window.showAuth=function(){try{if(!me()){stop();window.__dxShownUid=null;var v=document.getElementById('view');if(v)v.innerHTML=''}}catch(e){}return os.apply(this,arguments)};
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){setTimeout(start,1500)});else setTimeout(start,1500);
+})();
+
+/* ---------- startup failure: real status + safe retry (retry only re-reads data, never repeats a financial action) ---------- */
+window.dxShowLoadRetry=function(){
+  if(document.getElementById('dxLoadRetry'))return;
+  var d=document.createElement('div');d.id='dxLoadRetry';d.setAttribute('role','alert');
+  d.style.cssText='position:fixed;left:12px;right:12px;bottom:14px;z-index:2147483000;display:flex;gap:10px;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:14px;background:#b3261e;color:#fff;font:600 13px/1.5 system-ui,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.25)';
+  var t=document.createElement('span');t.textContent=L('ستاسو د حساب معلومات ونه لوېدل.','اطلاعات حساب بارگذاری نشد.','Your account data could not be loaded.');
+  var b=document.createElement('button');b.type='button';b.textContent=L('بیا هڅه','تلاش دوباره','Retry');
+  b.style.cssText='border:0;border-radius:10px;padding:8px 14px;font-weight:800;background:#fff;color:#b3261e;cursor:pointer';
+  b.onclick=function(){b.disabled=true;Promise.resolve(window.DXStartup&&DXStartup.refresh(true)).finally(function(){b.disabled=false;if(me())window.dxHideLoadRetry()})};
+  d.appendChild(t);d.appendChild(b);document.body.appendChild(d);
+};
+window.dxHideLoadRetry=function(){var d=document.getElementById('dxLoadRetry');if(d)d.remove()};
+
+/* ---------- Community: public leaderboard source ----------
+   Regular users cannot read other users' rows from `profiles` (RLS: own row / admin only), so the old query
+   returned only the user's own row for them and everything for the admin. The narrow fix is a read-only
+   SECURITY DEFINER function returning ONLY public fields (see sql/dx_community_members.sql). */
+var CM={rows:[],offset:0,page:100,more:false,error:null,missing:false};
+window.__dxCm=CM;
+window.dxCommunityFetch=async function(keep){
+  var c=sb();
+  if(!c)return {ok:false};
+  if(!window.__dxCmKeep){CM.rows=[];CM.offset=0;CM.more=false}
+  window.__dxCmKeep=false;CM.error=null;CM.missing=false;
+  try{
+    var r=await c.rpc('dx_community_members',{p_limit:CM.page,p_offset:CM.offset});
+    if(r.error)throw r.error;
+    var data=Array.isArray(r.data)?r.data:[];
+    CM.rows=CM.rows.concat(data);CM.offset=CM.rows.length;CM.more=data.length>=CM.page;
+    return {ok:true,rows:CM.rows};
+  }catch(e){
+    var m=String(e&&(e.message||e.code)||e);
+    CM.missing=/PGRST202|42883|could not find the function|does not exist/i.test(m)||e&&(e.code==='PGRST202'||e.code==='42883');
+    CM.error=m;console.warn('[DX COMMUNITY] dx_community_members failed:',m);
+    return {ok:false,error:m};
+  }
+};
+var origCommunity=window.community;
+if(typeof origCommunity==='function'){
+  window.community=async function(v){
+    var r=await origCommunity.apply(this,arguments);
+    try{
+      var root=v&&v.querySelector('.screen');if(!root)return r;
+      var old=root.querySelector('#dxCmNote');if(old)old.remove();
+      var box=null;
+      if(CM.error){
+        box=document.createElement('div');box.id='dxCmNote';box.className='panel';box.style.cssText='margin-top:12px;border:1px solid #e0b4b4';
+        box.innerHTML='<p class="muted" style="margin:0 0 8px"></p>';
+        box.firstChild.textContent=L('د ټولنې بشپړ لیست ونه لوستل شو. ښکاره شوي معلومات ممکن بشپړ نه وي.','فهرست کامل جامعه بارگذاری نشد؛ اطلاعات نمایش‌داده‌شده ممکن کامل نباشد.','The full community list could not be loaded; what is shown may be incomplete.')+(CM.missing?'':'');
+        var rb=document.createElement('button');rb.type='button';rb.className='outline';rb.textContent=L('بیا هڅه','تلاش دوباره','Retry');
+        rb.onclick=function(){window.community(v)};box.appendChild(rb);
+      }else if(CM.more){
+        box=document.createElement('div');box.id='dxCmNote';box.style.cssText='margin-top:12px;text-align:center';
+        var mb=document.createElement('button');mb.type='button';mb.className='outline';mb.textContent=L('نور وښایه','نمایش بیشتر','Load more');
+        mb.onclick=function(){mb.disabled=true;window.__dxCmKeep=true;window.community(v)};box.appendChild(mb);
+      }
+      if(box)root.appendChild(box);
+    }catch(e){console.warn('[DX COMMUNITY] note',e)}
+    return r;
+  };
+}
 })();
 </script>
