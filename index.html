@@ -8771,15 +8771,16 @@ if(typeof origCommunity==='function'){
     };
     const rows=all.filter(matches);
     const html=rows.map(t=>{
-      const st=txStatus(t),pending=st==='pending';
-      const isUsdtWithdraw=t.type==='Withdraw'&&String(t.currency||'').toUpperCase()==='USDT';
-      const statusCell=pending
-        ? `<select aria-label="Transaction decision" data-dx-tx="${escA(txKey(t))}" onchange="adminSetTxStatus('${escA(t.userId)}','${escA(txKey(t))}',this.value);if(!this.value)this.value='pending'">
-             <option value="pending" selected>${escA(typeof tr==='function'?tr('Status Pending'):'Pending')}</option>
-             <option value="confirmed" ${isUsdtWithdraw?'disabled title="USDT withdrawal completion requires verified BSC receipt"':''}>${escA(typeof tr==='function'?tr('Status Confirmed'):'Confirmed')}${isUsdtWithdraw?' — BSC verification required':''}</option>
-             <option value="rejected">${escA(typeof tr==='function'?tr('Status Rejected'):'Rejected')}</option>
-           </select>`
-        : `<span class="dx-admin-tx-status">${escA(st)}</span>`;
+      const st=txStatus(t);
+      const canDecide=['pending','processing'].includes(st);
+      const statusLabel=({pending:'Pending',processing:'Processing',confirmed:'Confirmed',completed:'Completed',rejected:'Rejected',failed:'Failed',cancelled:'Cancelled',canceled:'Cancelled'})[st]||st;
+      const statusCell=canDecide
+        ? `<div class="dx-admin-decision"><span class="dx-admin-tx-status dx-status-${escA(st)}">${escA(statusLabel)}</span><select aria-label="Transaction decision" data-dx-tx="${escA(txKey(t))}" onchange="adminSetTxStatus('${escA(t.userId)}','${escA(txKey(t))}',this.value);this.value=''">
+             <option value="" selected>${escA(typeof tr==='function'?tr('Choose action'):'Choose action')}</option>
+             <option value="confirmed">${escA(typeof tr==='function'?tr('Status Confirmed'):'Confirm')}</option>
+             <option value="rejected">${escA(typeof tr==='function'?tr('Status Rejected'):'Reject')}</option>
+           </select></div>`
+        : `<span class="dx-admin-tx-status dx-status-${escA(st)}">${escA(statusLabel)}</span>`;
       const details=t.ref||t.dest||t.phone||t.address||t.to||t.destination||t.meta?.provider_tx_id||t.meta?.tx_hash||'—';
       return `<tr><td>${escA(t.name)}<br><small>${escA(t.user)}</small></td><td>${escA(t.type)}</td><td>${escA(t.amount)}</td><td>${escA(t.currency)}</td><td>${statusCell}</td><td>${t.time?new Date(t.time).toLocaleString():'—'}</td><td style="overflow-wrap:anywhere">${escA(details)}</td></tr>`;
     }).join('');
@@ -8787,7 +8788,7 @@ if(typeof origCommunity==='function'){
       <div class="field" style="margin:0 0 10px"><label>🔎 ${typeof tr==='function'?tr('Search'):'Search'}</label>
         <div style="display:flex;gap:7px;align-items:center"><input id="dxAdminTxSearch" type="search" autocomplete="off" value="${escA(window.__dxAdminTxSearch||'')}" placeholder="Name, Email, TX ID, Address" style="flex:1;min-width:0">
         <button class="primary gold" type="button" onclick="adminTransactionsSearch()">${typeof tr==='function'?tr('Search'):'Search'}</button></div>
-        <small class="muted">${rows.length} / ${all.length} ${typeof tr==='function'?tr('Transactions'):'Transactions'} · Only Pending transactions can be decided.</small>
+        <small class="muted">${rows.length} / ${all.length} ${typeof tr==='function'?tr('Transactions'):'Transactions'} · Pending / Processing transactions can be reviewed.</small>
       </div>
       <div class="tablewrap"><table class="table"><tr><th>${typeof tr==='function'?tr('User'):'User'}</th><th>${typeof tr==='function'?tr('Type'):'Type'}</th><th>${typeof tr==='function'?tr('Amount'):'Amount'}</th><th>${typeof tr==='function'?tr('Currency'):'Currency'}</th><th>${typeof tr==='function'?tr('Transaction Status'):'Status'}</th><th>${typeof tr==='function'?tr('Time'):'Time'}</th><th>${typeof tr==='function'?tr('Details'):'Details'}</th></tr>${html||'<tr><td colspan="7">No transactions</td></tr>'}</table></div>
       <button class="outline" style="margin-top:10px" onclick="closeModal()">${typeof tr==='function'?tr('Close'):'Close'}</button>`);
@@ -8796,6 +8797,11 @@ if(typeof origCommunity==='function'){
   };
   window.adminTransactionsSearch=function(){window.__dxAdminTxSearch=String(document.getElementById('dxAdminTxSearch')?.value||'').trim();window.adminTransactions()};
 
+  /* Admin transaction decision controls — scoped to All Transactions only. */
+  const dxAdminTxStyle=document.createElement('style');
+  dxAdminTxStyle.textContent=`.dx-admin-decision{display:flex;flex-direction:column;gap:6px;min-width:112px}.dx-admin-decision select{width:100%;min-height:36px;border:1px solid rgba(212,175,55,.55);border-radius:9px;padding:6px 8px;background:var(--card,#fff);color:inherit;font:inherit}.dx-admin-tx-status{display:inline-flex;align-items:center;gap:5px;font-weight:700;text-transform:capitalize}.dx-status-processing{color:#d97706}.dx-status-completed,.dx-status-confirmed{color:#16a34a}.dx-status-failed,.dx-status-rejected,.dx-status-cancelled{color:#dc2626}`;
+  document.head.appendChild(dxAdminTxStyle);
+
   /* No local wallet edits: the database RPC is the sole authority for balance + status. */
   window.adminSetTxStatus=async function(userId,txId,status){
     status=String(status||'').toLowerCase();
@@ -8803,11 +8809,7 @@ if(typeof origCommunity==='function'){
     const u=state?.users?.find(x=>String(x.id)===String(userId));
     const t=u?.tx?.find(x=>txKey(x)===String(txId));
     if(!u||!t){if(typeof toast==='function')toast('Transaction not found. Refresh and try again.');return window.adminTransactions()}
-    if(txStatus(t)!=='pending'){if(typeof toast==='function')toast('Only unanswered Pending transactions can be changed.');try{await dbLoadAllUsers()}catch(_){}return window.adminTransactions()}
-    if(t.type==='Withdraw'&&String(t.currency||'').toUpperCase()==='USDT'&&status==='confirmed'){
-      if(typeof toast==='function')toast('USDT withdrawal can be completed only after its real BSC transaction receipt is verified.');
-      return window.adminTransactions();
-    }
+    if(!['pending','processing'].includes(txStatus(t))){if(typeof toast==='function')toast('Only Pending / Processing transactions can be changed.');try{await dbLoadAllUsers()}catch(_){}return window.adminTransactions()}
     if(typeof ensureAdmin==='function'&&!ensureAdmin())return window.adminTransactions();
     if(!window.supabaseClient||!dbReady()){if(typeof toast==='function')toast('Secure Supabase connection is required.');return window.adminTransactions()}
     const selects=[...document.querySelectorAll('select[data-dx-tx]')];selects.forEach(x=>{if(x.dataset.dxTx===String(txId))x.disabled=true});
@@ -8818,7 +8820,14 @@ if(typeof origCommunity==='function'){
       if(typeof dbLoadAllUsers==='function')await dbLoadAllUsers();
       else if(typeof refreshFromServer==='function')await refreshFromServer();
       const refreshed=state?.users?.find(x=>String(x.id)===String(userId))?.tx?.find(x=>txKey(x)===String(txId));
-      if(!refreshed||txStatus(refreshed)!==status)throw new Error('Supabase did not return the requested transaction status.');
+      /* Withdrawals are finalized as `completed` by the secure backend, while
+         deposits/easyload use `confirmed`. Accept the real canonical result. */
+      const acceptedStatuses = (status==='confirmed' && String(t.type||'').toLowerCase()==='withdraw')
+        ? ['completed','confirmed','success','successful','paid','settled','finalized','executed']
+        : [status];
+      if(!refreshed||!acceptedStatuses.includes(txStatus(refreshed))) {
+        throw new Error('Database status was not updated to the expected final state. Current: '+(refreshed?txStatus(refreshed):'not found'));
+      }
       if(typeof toast==='function')toast(status==='confirmed'?'Transaction confirmed and saved':'Transaction rejected and saved');
       window.adminTransactions();
       return data;
@@ -8872,3 +8881,98 @@ if(typeof origCommunity==='function'){
 })();
 </script>
 
+
+<script id="dx-processing-mode-per-currency-v2">
+/* Processing Mode UI: independent AFN/USDT deposit + withdrawal modes.
+   Easyload remains on its existing, separate setting. */
+(function(){
+  'use strict';
+  if(window.__dxProcessingModePerCurrencyV2)return;
+  window.__dxProcessingModePerCurrencyV2=true;
+
+  function cur(code){
+    return Array.isArray(state.currencies)
+      ? state.currencies.find(x=>String(x.code||'').toUpperCase()===code)
+      : null;
+  }
+  function mode(code,kind){
+    const c=cur(code);
+    return c && c.processing && c.processing[kind]==='manual' ? 'manual' : 'automatic';
+  }
+  function safe(s){
+    return String(s==null?'':s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
+  }
+  window.dxSaveCurrencyProcessingMode=function(code,kind,value){
+    if(typeof ensureAdmin==='function'&&!ensureAdmin())return toast('Admin access required');
+    if(!['AFN','USDT'].includes(code)||!['deposit','withdraw'].includes(kind)||!['automatic','manual'].includes(value))return;
+    const c=cur(code);
+    if(!c)return toast('Currency settings not found');
+    c.processing=c.processing||{};
+    c.processing[kind]=value;
+    try{
+      if(typeof v20PersistSettings==='function')v20PersistSettings();
+      else if(typeof save==='function')save();
+      toast(code+' '+kind+' mode saved');
+      window.adminProcessingModes();
+    }catch(e){
+      console.error('[DX Processing Mode]',e);
+      toast(e.message||'Processing mode save failed');
+    }
+  };
+  window.dxSaveEasyloadProcessingMode=function(value){
+    if(typeof ensureAdmin==='function'&&!ensureAdmin())return toast('Admin access required');
+    if(!['automatic','manual'].includes(value))return;
+    state.processingModes=state.processingModes||{};
+    state.processingModes.easyload=value;
+    state.easyloadModeInitialized=true;
+    try{
+      if(typeof saveV13==='function')saveV13();
+      else if(typeof save==='function')save();
+      if(typeof dbSyncAdminSettings==='function'&&typeof dbReady==='function'&&dbReady())dbSyncAdminSettings().catch(console.warn);
+      toast('Easyload mode saved');
+      window.adminProcessingModes();
+    }catch(e){
+      console.error('[DX Easyload Mode]',e);
+      toast(e.message||'Easyload mode save failed');
+    }
+  };
+
+  window.adminProcessingModes=function(){
+    if(typeof ensureAdmin==='function'&&!ensureAdmin())return toast('Admin access required');
+    const currencies=['USDT','AFN'];
+    const cards=currencies.map(code=>{
+      const c=cur(code);
+      if(!c)return `<div class="panel"><b>${code}</b><div class="notice">Currency settings not found.</div></div>`;
+      return `<div class="panel" style="margin:10px 0">
+        <h3 style="margin:0 0 10px">${code} Processing Mode</h3>
+        ${['deposit','withdraw'].map(kind=>{
+          const selected=mode(code,kind);
+          const label=kind==='deposit'?'Deposit':'Withdraw';
+          return `<div style="padding:9px 0;border-top:1px solid var(--line)">
+            <b>${label}</b>
+            <div class="compact-grid" style="margin-top:8px">
+              <button class="outline" onclick="dxSaveCurrencyProcessingMode('${code}','${kind}','automatic')">${selected==='automatic'?'✓ ':''}⚡ Automatic</button>
+              <button class="outline" onclick="dxSaveCurrencyProcessingMode('${code}','${kind}','manual')">${selected==='manual'?'✓ ':''}✋ Manual Approval</button>
+            </div>
+            <small class="muted">Current: ${safe(selected==='manual'?'Manual Approval':'Automatic')}</small>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }).join('');
+    const easy=state.processingModes&&state.processingModes.easyload==='automatic'?'automatic':'manual';
+    showModal(`<h3>Processing Mode</h3>
+      <p class="muted">USDT and AFN are configured independently. Easyload remains separate.</p>
+      ${cards}
+      <div class="panel" style="margin:10px 0">
+        <h3 style="margin:0 0 8px">Easyload</h3>
+        <div class="compact-grid">
+          <button class="outline" onclick="dxSaveEasyloadProcessingMode('automatic')">${easy==='automatic'?'✓ ':''}⚡ Automatic</button>
+          <button class="outline" onclick="dxSaveEasyloadProcessingMode('manual')">${easy==='manual'?'✓ ':''}✋ Manual Approval</button>
+        </div>
+        <small class="muted">Current: ${safe(easy==='manual'?'Manual Approval':'Automatic')}</small>
+      </div>
+      <div class="notice">Important: these settings are saved separately. The secure backend must also read and enforce these modes before any provider or on-chain transfer is executed.</div>
+      <button class="outline" onclick="closeModal()">Close</button>`);
+  };
+})();
+</script>
