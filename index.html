@@ -6729,8 +6729,38 @@ function buildReceipt(mdl){
   run(ctx,true);
   return out;
 }
-// Expose the exact existing receipt renderer for the authenticated, per-user upload flow.
-window.dxBuildReceipt=buildReceipt;
+/* Create the exact same HD receipt used by Download and upload it privately for the public Telegram report. */
+window.dxUploadTransactionReceipt=async function(row){
+  let uploadPath=null;
+  try{
+    if(!row||!row.id||!row.user_id||!supabaseClient)return false;
+    const status=dxCanonicalTxStatus(row.status);
+    if(status==='pending')return false;
+    const {data:{user},error:authError}=await supabaseClient.auth.getUser();
+    if(authError||!user||user.id!==String(row.user_id))return false;
+    const path=String(row.user_id)+'/'+String(row.id)+'.png';
+    uploadPath=path;
+    window.__dxReceiptUploads=window.__dxReceiptUploads||new Set();
+    if(window.__dxReceiptUploads.has(path))return true;
+    window.__dxReceiptUploads.add(path);
+    const typeMap={deposit:'Deposit',withdraw:'Withdraw',withdrawal:'Withdraw',swap:'Swap',easyload:'Easyload',points_redeem:'Points Redeem',points_adjustment:'Points Adjustment'};
+    const receiptTx={id:row.tx_id||row.id,txId:row.tx_id||row.id,type:typeMap[String(row.type||'').toLowerCase()]||String(row.type||''),currency:row.currency||'',amount:row.amount==null?0:Number(row.amount),out:row.received_amount==null?null:Number(row.received_amount),fee:row.fee==null?0:Number(row.fee),from:row.from_value||null,to:row.to_value||null,network:row.network||null,status:row.status||'pending',balanceBefore:row.balance_before==null?null:Number(row.balance_before),balanceAfter:row.balance_after==null?null:Number(row.balance_after),meta:row.metadata||{},time:row.created_at||new Date().toISOString()};
+    const canvas=buildReceipt(txModel(receiptTx));
+    const blob=await new Promise((resolve,reject)=>{try{canvas.toBlob(b=>b?resolve(b):reject(new Error('Receipt PNG encoding failed')),'image/png')}catch(e){reject(e)}});
+    const {error}=await supabaseClient.storage.from('transaction-receipts').upload(path,blob,{contentType:'image/png',upsert:false});
+    if(error){
+      const msg=String(error.message||error);
+      if(/already exists|duplicate|409/i.test(msg))return true;
+      throw error;
+    }
+    console.info('[DX RECEIPT] Uploaded private transaction receipt',path);
+    return true;
+  }catch(e){
+    if(uploadPath&&window.__dxReceiptUploads)window.__dxReceiptUploads.delete(uploadPath);
+    console.error('[DX RECEIPT] Automatic receipt upload failed',e&&e.message||e);
+    return false;
+  }
+};
 window.dxDownloadTx=function(){
   if(!curTx)return;
   try{
@@ -8552,33 +8582,6 @@ function L(ps,fa,en){var l=lang();return l==='en'?en:l==='fa'?fa:ps}
 var TYPE={deposit:'Deposit',withdraw:'Withdraw',swap:'Swap',points_redeem:'Points Redeem',points_adjustment:'Points Adjustment',easyload:'Easyload'};
 function mapRow(t){return {id:t.tx_id,txId:t.tx_id,type:TYPE[t.type]||t.type,amount:Number(t.amount||0),currency:t.currency,out:t.received_amount==null?null:Number(t.received_amount),fee:Number(t.fee||0),from:t.from_value||null,to:t.to_value||null,network:t.network||null,approvalMode:t.approval_mode||'automatic',status:t.status||'pending',balanceBefore:t.balance_before==null?null:Number(t.balance_before),balanceAfter:t.balance_after==null?null:Number(t.balance_after),meta:t.metadata||{},time:t.created_at||new Date().toISOString()}}
 
-/* Upload the same HD receipt used by the Download button, only for a fresh terminal Realtime event. */
-var receiptUploads=new Set();
-window.dxUploadTerminalReceipt=async function(payload){
-  var uploadKey=null;
-  try{
-    if(!payload||!payload.new)return;
-    var row=payload.new,old=payload.old||{};
-    var terminal=['confirmed','complete','completed','success','successful','paid','settled','finalized','executed','approved','rejected','failed','cancelled','canceled','declined','refunded','expired'];
-    var status=String(row.status||'').trim().toLowerCase();
-    if(terminal.indexOf(status)<0)return;
-    if(payload.eventType==='UPDATE'&&terminal.indexOf(String(old.status||'').trim().toLowerCase())>=0)return;
-    var u=me(),c=sb();if(!u||!u.id||row.user_id!==u.id||!c||!c.storage)return;
-    if(!row.id||!row.tx_id)return;
-    var key=String(row.id);if(receiptUploads.has(key))return;receiptUploads.add(key);uploadKey=key;
-    var mdl=window.dxTxModel(mapRow(row));
-    var canvas=window.dxBuildReceipt&&window.dxBuildReceipt(mdl);
-    if(!canvas)throw new Error('Receipt renderer is unavailable');
-    var blob=await new Promise(function(resolve,reject){canvas.toBlob(function(b){if(b)resolve(b);else reject(new Error('Receipt PNG encoding failed'))},'image/png')});
-    var path=u.id+'/'+row.id+'.png';
-    var result=await c.storage.from('transaction-receipts').upload(path,blob,{contentType:'image/png',cacheControl:'3600',upsert:false});
-    if(result&&result.error){
-      var msg=String(result.error.message||'');
-      if(!/already exists|duplicate|409/i.test(msg))throw result.error;
-    }
-  }catch(e){if(uploadKey)receiptUploads.delete(uploadKey);console.warn('[DX receipt upload] failed; public notification will retry if image is not present',e&&e.message||e)}
-};
-
 /* ---------- Realtime lifecycle ---------- */
 function stop(){
   epoch++;clearTimeout(timer);timer=null;dirty=false;
@@ -8597,7 +8600,7 @@ function start(){
   try{
     chan=c.channel('dx-sync-'+uid)
       .on('postgres_changes',{event:'*',schema:'public',table:'wallets',filter:'user_id=eq.'+uid},function(){if(ep===epoch)sched()})
-      .on('postgres_changes',{event:'*',schema:'public',table:'transactions',filter:'user_id=eq.'+uid},function(payload){if(ep===epoch){try{if(window.dxUploadTerminalReceipt)window.dxUploadTerminalReceipt(payload)}catch(e){}sched()}})
+      .on('postgres_changes',{event:'*',schema:'public',table:'transactions',filter:'user_id=eq.'+uid},function(payload){if(ep!==epoch)return;sched();try{if(payload&&payload.new&&payload.new.id&&window.dxUploadTransactionReceipt)window.dxUploadTransactionReceipt(payload.new)}catch(e){console.warn('[DX RECEIPT] Realtime handler failed',e)}})
       .subscribe(function(status){
         if(ep!==epoch)return;
         if(status==='SUBSCRIBED'){retries=0;sched(0)}   /* catch up on anything missed while disconnected */
