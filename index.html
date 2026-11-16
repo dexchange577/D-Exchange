@@ -6731,15 +6731,13 @@ function buildReceipt(mdl){
 }
 /* Create the exact same HD receipt used by Download and upload it privately for the public Telegram report. */
 window.dxUploadTransactionReceipt=async function(row){
-  let uploadPath=null;
   try{
     if(!row||!row.id||!row.user_id||!supabaseClient)return false;
     const status=dxCanonicalTxStatus(row.status);
-    if(status==='pending')return false;
+    if(!['confirmed','completed','approved','rejected'].includes(status))return false;
     const {data:{user},error:authError}=await supabaseClient.auth.getUser();
     if(authError||!user||user.id!==String(row.user_id))return false;
     const path=String(row.user_id)+'/'+String(row.id)+'.png';
-    uploadPath=path;
     window.__dxReceiptUploads=window.__dxReceiptUploads||new Set();
     if(window.__dxReceiptUploads.has(path))return true;
     window.__dxReceiptUploads.add(path);
@@ -6756,7 +6754,6 @@ window.dxUploadTransactionReceipt=async function(row){
     console.info('[DX RECEIPT] Uploaded private transaction receipt',path);
     return true;
   }catch(e){
-    if(uploadPath&&window.__dxReceiptUploads)window.__dxReceiptUploads.delete(uploadPath);
     console.error('[DX RECEIPT] Automatic receipt upload failed',e&&e.message||e);
     return false;
   }
