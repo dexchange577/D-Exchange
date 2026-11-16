@@ -6740,7 +6740,6 @@ window.dxUploadTransactionReceipt=async function(row){
     const path=String(row.user_id)+'/'+String(row.id)+'.png';
     window.__dxReceiptUploads=window.__dxReceiptUploads||new Set();
     if(window.__dxReceiptUploads.has(path))return true;
-    window.__dxReceiptUploads.add(path);
     const typeMap={deposit:'Deposit',withdraw:'Withdraw',withdrawal:'Withdraw',swap:'Swap',easyload:'Easyload',points_redeem:'Points Redeem',points_adjustment:'Points Adjustment'};
     const receiptTx={id:row.tx_id||row.id,txId:row.tx_id||row.id,type:typeMap[String(row.type||'').toLowerCase()]||String(row.type||''),currency:row.currency||'',amount:row.amount==null?0:Number(row.amount),out:row.received_amount==null?null:Number(row.received_amount),fee:row.fee==null?0:Number(row.fee),from:row.from_value||null,to:row.to_value||null,network:row.network||null,status:row.status||'pending',balanceBefore:row.balance_before==null?null:Number(row.balance_before),balanceAfter:row.balance_after==null?null:Number(row.balance_after),meta:row.metadata||{},time:row.created_at||new Date().toISOString()};
     const canvas=buildReceipt(txModel(receiptTx));
@@ -6748,13 +6747,16 @@ window.dxUploadTransactionReceipt=async function(row){
     const {error}=await supabaseClient.storage.from('transaction-receipts').upload(path,blob,{contentType:'image/png',upsert:false});
     if(error){
       const msg=String(error.message||error);
-      if(/already exists|duplicate|409/i.test(msg))return true;
+      if(/already exists|duplicate|409/i.test(msg)){window.__dxReceiptUploads.add(path);return true;}
       throw error;
     }
+    window.__dxReceiptUploads.add(path);
     console.info('[DX RECEIPT] Uploaded private transaction receipt',path);
     return true;
   }catch(e){
-    console.error('[DX RECEIPT] Automatic receipt upload failed',e&&e.message||e);
+    /* Failed uploads must remain retryable; do not poison the in-memory de-duplication set. */
+    try{if(window.__dxReceiptUploads)window.__dxReceiptUploads.delete(String(row&&row.user_id)+'/'+String(row&&row.id)+'.png')}catch(_){}
+    console.error('[DX RECEIPT] Automatic receipt upload failed; will retry on next sync',e&&e.message||e);
     return false;
   }
 };
@@ -8597,7 +8599,14 @@ function start(){
   try{
     chan=c.channel('dx-sync-'+uid)
       .on('postgres_changes',{event:'*',schema:'public',table:'wallets',filter:'user_id=eq.'+uid},function(){if(ep===epoch)sched()})
-      .on('postgres_changes',{event:'*',schema:'public',table:'transactions',filter:'user_id=eq.'+uid},function(payload){if(ep!==epoch)return;sched();try{if(payload&&payload.new&&payload.new.id&&window.dxUploadTransactionReceipt)window.dxUploadTransactionReceipt(payload.new)}catch(e){console.warn('[DX RECEIPT] Realtime handler failed',e)}})
+      .on('postgres_changes',{event:'*',schema:'public',table:'transactions',filter:'user_id=eq.'+uid},function(payload){
+        if(ep!==epoch)return;sched();
+        try{
+          if(payload&&payload.new&&payload.new.id&&window.dxUploadTransactionReceipt){
+            window.dxUploadTransactionReceipt(payload.new).then(function(ok){if(!ok)console.warn('[DX RECEIPT] Realtime upload did not complete; refresh will retry')}).catch(function(e){console.warn('[DX RECEIPT] Realtime upload failed',e&&e.message||e)});
+          }
+        }catch(e){console.warn('[DX RECEIPT] Realtime handler failed',e)}
+      })
       .subscribe(function(status){
         if(ep!==epoch)return;
         if(status==='SUBSCRIBED'){retries=0;sched(0)}   /* catch up on anything missed while disconnected */
@@ -8646,6 +8655,17 @@ function refresh(){
         ['AFN','USDT'].forEach(function(k){if(Number(cu.balances[k])!==nb[k])changed=true});
         cu.balances=Object.assign({},cu.balances,nb)}
       var rows=r[1].data||[],byId={};rows.forEach(function(x){byId[String(x.tx_id)]=mapRow(x)});
+      /* Recover receipt uploads if the Realtime event was missed while the user was offline.
+         Only recent terminal transactions are eligible; old history is never bulk-uploaded. */
+      if(typeof window.dxUploadTransactionReceipt==='function'){
+        var cutoff=Date.now()-15*60*1000;
+        rows.slice(0,25).forEach(function(x){
+          var st=String(x.status||'').toLowerCase(),created=Date.parse(x.created_at||'')||0;
+          if(created>=cutoff&&['confirmed','completed','approved','rejected'].indexOf(st)>-1){
+            window.dxUploadTransactionReceipt(x).catch(function(e){console.warn('[DX RECEIPT] Sync retry failed',e&&e.message||e)});
+          }
+        });
+      }
       var seen={},merged=[];
       rows.forEach(function(x){var id=String(x.tx_id);seen[id]=1;merged.push(byId[id])});
       (cu.tx||[]).forEach(function(t){var id=String(t.txId||t.id);if(!seen[id]){seen[id]=1;merged.push(t)}});   /* keep older rows beyond the 200 fetched */
