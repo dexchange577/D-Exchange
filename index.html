@@ -6861,34 +6861,37 @@ function buildReceipt(mdl){
   run(ctx,true);
   return out;
 }
-/* Create the exact same HD receipt used by Download and upload it privately for the public Telegram report. */
+/* Create the exact same HD receipt used by Download and send it directly to Telegram without Storage. */
 window.dxUploadTransactionReceipt=async function(row){
+  const path=row&&row.user_id&&row.id?String(row.user_id)+'/'+String(row.id)+'.png':null;
   try{
     if(!row||!row.id||!row.user_id||!supabaseClient)return false;
     const status=dxCanonicalTxStatus(row.status);
     if(!['confirmed','completed','approved','rejected'].includes(status))return false;
     const {data:{user},error:authError}=await supabaseClient.auth.getUser();
     if(authError||!user||user.id!==String(row.user_id))return false;
-    const path=String(row.user_id)+'/'+String(row.id)+'.png';
     window.__dxReceiptUploads=window.__dxReceiptUploads||new Set();
     if(window.__dxReceiptUploads.has(path))return true;
     const typeMap={deposit:'Deposit',withdraw:'Withdraw',withdrawal:'Withdraw',swap:'Swap',easyload:'Easyload',points_redeem:'Points Redeem',points_adjustment:'Points Adjustment'};
     const receiptTx={id:row.tx_id||row.id,txId:row.tx_id||row.id,type:typeMap[String(row.type||'').toLowerCase()]||String(row.type||''),currency:row.currency||'',amount:row.amount==null?0:Number(row.amount),out:row.received_amount==null?null:Number(row.received_amount),fee:row.fee==null?0:Number(row.fee),from:row.from_value||null,to:row.to_value||null,network:row.network||null,status:row.status||'pending',balanceBefore:row.balance_before==null?null:Number(row.balance_before),balanceAfter:row.balance_after==null?null:Number(row.balance_after),meta:row.metadata||{},time:row.created_at||new Date().toISOString()};
     const canvas=buildReceipt(txModel(receiptTx));
     const blob=await new Promise((resolve,reject)=>{try{canvas.toBlob(b=>b?resolve(b):reject(new Error('Receipt PNG encoding failed')),'image/png')}catch(e){reject(e)}});
-    const {error}=await supabaseClient.storage.from('transaction-receipts').upload(path,blob,{contentType:'image/png',upsert:false});
-    if(error){
-      const msg=String(error.message||error);
-      if(/already exists|duplicate|409/i.test(msg)){window.__dxReceiptUploads.add(path);return true;}
-      throw error;
-    }
+    if(!blob||blob.size<1||blob.size>9*1024*1024)throw new Error('Receipt PNG is empty or exceeds 9 MB');
+    const form=new FormData();
+    form.append('transaction_id',String(row.id));
+    form.append('photo',blob,'DExchange-'+String(row.id)+'.png');
+    const {data,error}=await supabaseClient.functions.invoke('telegram-bot-notification',{
+      body:form,
+      headers:{'x-dx-receipt-upload':'1'}
+    });
+    if(error)throw error;
+    if(!data||data.ok!==true)throw new Error(data&&data.error||'Direct Telegram receipt delivery failed');
     window.__dxReceiptUploads.add(path);
-    console.info('[DX RECEIPT] Uploaded private transaction receipt',path);
+    console.info('[DX RECEIPT] Sent HD transaction receipt directly to Telegram; Supabase Storage was not used',path);
     return true;
   }catch(e){
-    /* Failed uploads must remain retryable; do not poison the in-memory de-duplication set. */
-    try{if(window.__dxReceiptUploads)window.__dxReceiptUploads.delete(String(row&&row.user_id)+'/'+String(row&&row.id)+'.png')}catch(_){}
-    console.error('[DX RECEIPT] Automatic receipt upload failed; will retry on next sync',e&&e.message||e);
+    try{if(window.__dxReceiptUploads&&path)window.__dxReceiptUploads.delete(path)}catch(_){}
+    console.error('[DX RECEIPT] Direct Telegram receipt delivery failed; will retry on next sync',e&&e.message||e);
     return false;
   }
 };
