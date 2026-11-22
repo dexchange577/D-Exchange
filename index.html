@@ -562,18 +562,33 @@ html,body{max-width:100%;overflow-x:hidden}
 </style>
 
 <script>
-window.dxSignupTurnstileToken="";
-window.dxSignupWidgetId=null;
-window.dxSignupCaptchaSuccess=function(token){window.dxSignupTurnstileToken=String(token||"")};
-window.dxSignupCaptchaExpired=function(){window.dxSignupTurnstileToken=""};
-window.dxSignupCaptchaError=function(){window.dxSignupTurnstileToken="";try{toast("CAPTCHA could not load. Please refresh and try again.")}catch(_){}};
-window.dxInitSignupTurnstile=function(){
- if(!window.turnstile||window.dxSignupWidgetId)return;
- var node=document.getElementById("dxSignupTurnstile");if(!node)return;
- window.dxSignupWidgetId=window.turnstile.render(node,{sitekey:"0x4AAAAAAGMQvMU-nRLVQxBN",theme:"auto",size:"normal",action:"signup",callback:window.dxSignupCaptchaSuccess,"expired-callback":window.dxSignupCaptchaExpired,"error-callback":window.dxSignupCaptchaError});
+window.dxSignupRecaptchaToken="";
+window.dxSignupRecaptchaWidgetId=null;
+window.dxSignupRecaptchaSuccess=function(token){window.dxSignupRecaptchaToken=String(token||"")};
+window.dxSignupRecaptchaExpired=function(){window.dxSignupRecaptchaToken=""};
+window.dxSignupRecaptchaError=function(){window.dxSignupRecaptchaToken="";try{toast("reCAPTCHA could not load. Please refresh and try again.")}catch(_){}};
+window.dxInitSignupRecaptcha=function(){
+ if(!window.grecaptcha||!window.grecaptcha.render||window.dxSignupRecaptchaWidgetId!==null)return;
+ var node=document.getElementById("dxSignupRecaptcha");
+ if(!node)return;
+ try{
+  window.dxSignupRecaptchaWidgetId=window.grecaptcha.render(node,{
+   sitekey:"6LdvniwuAAAAAAhFzmikjImkPh2LcgcU4Ju_W2KU",
+   callback:window.dxSignupRecaptchaSuccess,
+   "expired-callback":window.dxSignupRecaptchaExpired,
+   "error-callback":window.dxSignupRecaptchaError,
+   theme:"light",
+   size:"normal"
+  });
+ }catch(err){
+  window.dxSignupRecaptchaWidgetId=null;
+  console.error("Google reCAPTCHA render failed:",err);
+  window.dxSignupRecaptchaError();
+ }
 };
+document.addEventListener("DOMContentLoaded",function(){window.dxInitSignupRecaptcha()});
 </script>
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=dxInitSignupTurnstile" async defer></script>
+<script src="https://www.google.com/recaptcha/api.js?onload=dxInitSignupRecaptcha&render=explicit" async defer></script>
 <style id="dx-auth-compact-semi3d">
 /* Compact auth layout; retain the existing D Exchange palette, backgrounds and artwork. */
 #auth{padding:12px!important;align-items:center}
@@ -629,7 +644,7 @@ window.dxInitSignupTurnstile=function(){
     <div class="field"><label id="rPassConfirmLbl">Confirm password</label><input id="rPassConfirm" type="password" minlength="8" autocomplete="new-password" required></div>
     <div class="field"><label>Referral code</label><input id="rRef" inputmode="numeric" pattern="[0-9]*" placeholder="1010"></div>
    </div>
-   <div class="dx-signup-captcha full" id="dxSignupCaptchaWrap"><div id="dxSignupTurnstile"></div></div>
+   <div class="dx-signup-captcha full" id="dxSignupCaptchaWrap"><div id="dxSignupRecaptcha"></div></div>
    <button id="dxCreateAccountBtn" class="primary gold" style="width:100%">Create account</button>
    <div class="note">لږ تر لږه 8 کرکټر قوي پاسورډ. د ایمیل OTP تایید اړین دی.</div>
   </form>
@@ -858,19 +873,19 @@ async function register(e){
   const fullName=document.getElementById("rFullName").value.trim().replace(/\s+/g," ");
   const nameParts=fullName.split(" ").filter(Boolean),first=nameParts.shift()||"",last=nameParts.join(" ");
   const phone=(window.dxRegPhone?window.dxRegPhone():document.getElementById("rPhone").value.trim()),pass=document.getElementById("rPass").value,confirmPass=document.getElementById("rPassConfirm").value,ref=document.getElementById("rRef").value.trim();
-  const captchaToken=String(window.dxSignupTurnstileToken||"");
+  const captchaToken=String(window.dxSignupRecaptchaToken||"");
   if(pass!==confirmPass){document.getElementById("rPassConfirm")?.focus();return toast(state.lang==="ps"?"پاسورډونه یو له بل سره برابر نه دي.":state.lang==="fa"?"رمزهای عبور با هم مطابقت ندارند.":"Passwords do not match.");}
   if(!first||!email||!phone||pass.length<8)return toast(tr("Register data incomplete"));
   if(!captchaToken)return toast("Please complete the I am not a robot verification.");
   if(ref&&!/^\d+$/.test(ref))return toast(tr("Referral code must be numeric"));
   if(ref&&!dbReady()&&!state.users.some(u=>String(u.referralCode)===ref&&u.status==="active"))return toast(tr("Referral code not found"));
   if(dbReady()){
-   const {data,error}=await supabaseClient.functions.invoke("dx-signup-otp",{body:{action:"request",email,full_name:fullName,first_name:first,last_name:last,phone,referral_code:ref,turnstile_token:captchaToken}});
+   const {data,error}=await supabaseClient.functions.invoke("dx-signup-otp",{body:{action:"request",email,full_name:fullName,first_name:first,last_name:last,phone,referral_code:ref,recaptcha_token:captchaToken}});
    if(error)throw error;
    if(!data?.success)throw new Error(data?.error||"Could not send the email verification code.");
    signupOtpMeta={first,last,phone,ref,password:pass};
-   window.dxSignupTurnstileToken="";
-   try{if(window.turnstile&&window.dxSignupWidgetId)window.turnstile.reset(window.dxSignupWidgetId)}catch(_){}
+   window.dxSignupRecaptchaToken="";
+   try{if(window.grecaptcha&&window.dxSignupRecaptchaWidgetId!==null)window.grecaptcha.reset(window.dxSignupRecaptchaWidgetId)}catch(_){}
    showSignupOtp(email,signupOtpMeta);
    toast("د ایمیل OTP کوډ مو وګورئ؛ تر تایید مخکې حساب نه جوړېږي.");
    return;
